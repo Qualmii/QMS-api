@@ -103,24 +103,26 @@
 
 <script>
     (function () {
-        var token     = @json($accessToken);
-        var tokenType = @json($tokenType);
-        var expiresIn = @json($expiresIn);
+        var token       = @json($accessToken);
+        var deviceToken = @json($deviceToken);
+        var tokenType   = @json($tokenType);
+        var expiresIn   = @json($expiresIn);
         var frontendUrl = @json($frontendUrl);
 
-        // Сохраняем токен в localStorage (ключ совместим с большинством SPA)
+        // Сохраняем токены в localStorage
         try {
             localStorage.setItem('access_token', token);
+            localStorage.setItem('device_token', deviceToken);
             localStorage.setItem('token_type', tokenType);
             localStorage.setItem('expires_in', expiresIn);
             localStorage.setItem('token_expires_at', Date.now() + expiresIn * 1000);
         } catch (e) {
-            // Если localStorage недоступен — просто редиректим, фронтенд получит токен из URL
+            // Если localStorage недоступен — просто редиректим
         }
 
-        // Редиректим на фронтенд.
-        // Токен передаётся только в hash-фрагменте (#) — он не попадает в сервер-логи и историю.
+        // device_token передаётся в hash-фрагменте (#) — не попадает в server-логи
         var redirectUrl = frontendUrl + '#access_token=' + encodeURIComponent(token)
+                        + '&device_token=' + encodeURIComponent(deviceToken)
                         + '&token_type=' + encodeURIComponent(tokenType)
                         + '&expires_in=' + expiresIn;
 

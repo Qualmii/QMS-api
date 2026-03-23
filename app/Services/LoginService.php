@@ -48,9 +48,11 @@ class LoginService
     }
 
     /**
-     * Подтвердить логин и выдать JWT токен
+     * Подтвердить логин и выдать JWT + бессрочный device_token.
+     *
+     * @return array{jwt: string, device_token: string}|null
      */
-    public function confirmLoginAndGetToken(string $token): ?string
+    public function confirmLoginAndGetToken(string $token): ?array
     {
         $loginToken = LoginToken::findValidToken($token);
 
@@ -58,27 +60,33 @@ class LoginService
             return null;
         }
 
-        // Подтверждаем логин
         $loginToken->confirm();
+        $loginToken->refresh();
 
-        // Генерируем JWT токен
-        return JWTAuth::fromUser($loginToken->user);
+        return [
+            'jwt'          => JWTAuth::fromUser($loginToken->user),
+            'device_token' => $loginToken->device_token,
+        ];
     }
 
     /**
-     * Проверить, нужно ли подтверждение для нового устройства
-     * Возвращает true если это новое устройство (нету подтвержденного логина на этом UA/IP)
+     * Проверить, является ли устройство новым (не доверенным).
+     *
+     * Идентификация выполняется исключительно по бессрочному device_token,
+     * который клиент получает после первого подтверждения и отправляет
+     * в заголовке X-Device-Token. IP и User-Agent не используются:
+     * IP меняется слишком часто и провоцирует лишние подтверждения.
      */
-    public function isNewDevice(User $user, string $userAgent, string $ipAddress): bool
+    public function isNewDevice(User $user, ?string $deviceToken): bool
     {
-        $confirmedLoginOnDevice = LoginToken::where('user_id', $user->id)
-            ->where('is_confirmed', true)
-            ->where('user_agent', $userAgent)
-            ->where('ip_address', $ipAddress)
-            ->where('expires_at', '>', now())
-            ->exists();
+        if (!$deviceToken) {
+            return true;
+        }
 
-        return !$confirmedLoginOnDevice;
+        return !LoginToken::where('user_id', $user->id)
+            ->where('device_token', $deviceToken)
+            ->where('is_confirmed', true)
+            ->exists();
     }
 
     /**
@@ -90,13 +98,14 @@ class LoginService
     }
 
     /**
-     * Получить список подтвержденных сессий пользователя
+     * Получить список подтверждённых сессий пользователя.
+     * Подтверждённые устройства бессрочны (expires_at = null),
+     * поэтому фильтрация по времени не нужна.
      */
     public function getConfirmedSessions(User $user)
     {
         return LoginToken::where('user_id', $user->id)
             ->where('is_confirmed', true)
-            ->where('expires_at', '>', now())
             ->orderBy('confirmed_at', 'desc')
             ->get();
     }

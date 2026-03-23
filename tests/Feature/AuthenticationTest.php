@@ -8,6 +8,7 @@ use App\Models\LoginToken;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Str;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
@@ -176,11 +177,14 @@ class AuthenticationTest extends TestCase
                 'access_token',
                 'token_type',
                 'expires_in',
+                'device_token',
                 'user' => ['id', 'name', 'email', 'uin'],
             ]);
 
         $loginToken->refresh();
         $this->assertTrue($loginToken->is_confirmed);
+        $this->assertNotNull($loginToken->device_token);
+        $this->assertNull($loginToken->expires_at); // бессрочный
     }
 
     /**
@@ -217,6 +221,30 @@ class AuthenticationTest extends TestCase
         $response->assertStatus(401);
     }
 
+    public function test_confirm_login_web_redirects_to_frontend_with_confirmation_token(): void
+    {
+        $user = User::factory()->create();
+
+        $loginToken = LoginToken::create([
+            'user_id' => $user->id,
+            'token' => LoginToken::generateToken(),
+            'device_name' => 'Safari on macOS',
+            'is_confirmed' => false,
+            'expires_at' => now()->addHours(3),
+        ]);
+
+        $response = $this->get('/api/v1/login/confirm/' . $loginToken->token);
+
+        $response->assertRedirect(config('app.frontend_url') . '/login?confirmation_token=' . $loginToken->token);
+    }
+
+    public function test_confirm_login_web_redirects_with_error_for_invalid_or_expired_token(): void
+    {
+        $response = $this->get('/api/v1/login/confirm/expired-or-invalid-token');
+
+        $response->assertRedirect(config('app.frontend_url') . '/login?confirmation_error=invalid_or_expired');
+    }
+
     /**
      * Test 11: Известное устройство получает JWT токен сразу без подтверждения
      */
@@ -229,34 +257,32 @@ class AuthenticationTest extends TestCase
             'password' => bcrypt(self::DEFAULT_PASSWORD),
         ]);
 
-        // Первый логин - создаем подтвержденную сессию
-        $userAgent = 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X)';
-        $ipAddress = '192.168.1.1';
+        // Создаём уже подтверждённое устройство с бессрочным device_token
+        $deviceToken = Str::random(64);
 
         LoginToken::create([
-            'user_id' => $user->id,
-            'token' => 'known-device-token',
-            'user_agent' => $userAgent,
-            'ip_address' => $ipAddress,
-            'device_name' => 'iPhone 13',
+            'user_id'      => $user->id,
+            'token'        => LoginToken::generateToken(),
+            'device_name'  => 'iPhone 13',
+            'device_token' => $deviceToken,
             'is_confirmed' => true,
-            'expires_at' => now()->addHours(30),
+            'confirmed_at' => now(),
+            'expires_at'   => null, // бессрочный
         ]);
 
-        // Второй логин с тем же девайсом
+        // Логин с заголовком X-Device-Token — подтверждение не требуется
         $response = $this->postJson('/api/v1/login', [
-            'login' => 'john@example.com',
+            'login'    => 'john@example.com',
             'password' => self::DEFAULT_PASSWORD,
         ], [
-            'User-Agent' => $userAgent,
-            'REMOTE_ADDR' => $ipAddress, // Устанавливаем REMOTE_ADDR вместо X-Forwarded-For
+            'X-Device-Token' => $deviceToken,
         ]);
 
         $response->assertStatus(200)
-            ->assertJson([
-                'requires_confirmation' => false,
-            ])
-            ->assertJsonStructure(['access_token', 'token_type']);
+            ->assertJson(['requires_confirmation' => false])
+            ->assertJsonStructure(['access_token', 'token_type', 'device_token']);
+
+        Mail::assertNotSent(\App\Mail\LoginConfirmationMail::class);
     }
 
     /**

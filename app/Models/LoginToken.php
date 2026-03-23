@@ -23,6 +23,7 @@ class LoginToken extends Model
         'device_name',
         'ip_address',
         'user_agent',
+        'device_token',
         'is_confirmed',
         'confirmed_at',
         'expires_at',
@@ -52,15 +53,20 @@ class LoginToken extends Model
     }
 
     /**
-     * Проверить, истек ли токен
+     * Проверить, истёк ли токен.
+     * null означает бессрочный токен — никогда не истекает.
      */
     public function isExpired(): bool
     {
+        if ($this->expires_at === null) {
+            return false;
+        }
+
         return now()->isAfter($this->expires_at);
     }
 
     /**
-     * Проверить, подтвержден ли логин
+     * Проверить, подтверждён ли логин
      */
     public function isConfirmed(): bool
     {
@@ -68,7 +74,12 @@ class LoginToken extends Model
     }
 
     /**
-     * Подтвердить логин
+     * Подтвердить логин.
+     *
+     * При подтверждении генерируется бессрочный device_token, который клиент
+     * сохраняет (localStorage / Keychain) и отправляет в заголовке
+     * X-Device-Token при каждом последующем входе.
+     * expires_at обнуляется — доверенное устройство не протухает.
      */
     public function confirm(): void
     {
@@ -76,6 +87,8 @@ class LoginToken extends Model
             $this->update([
                 'is_confirmed' => true,
                 'confirmed_at' => now(),
+                'device_token' => Str::random(64),
+                'expires_at'   => null, // бессрочно
             ]);
         }
     }
@@ -106,10 +119,13 @@ class LoginToken extends Model
     }
 
     /**
-     * Удалить истекшие токены
+     * Удалить истекшие токены.
+     * Записи с expires_at = null (подтверждённые устройства) не трогаем.
      */
     public static function deleteExpired(): int
     {
-        return self::where('expires_at', '<', now())->delete();
+        return self::whereNotNull('expires_at')
+            ->where('expires_at', '<', now())
+            ->delete();
     }
 }

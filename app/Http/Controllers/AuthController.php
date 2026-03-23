@@ -13,8 +13,8 @@ use App\Models\LoginToken;
 use App\Models\User;
 use App\Services\LoginService;
 use App\Services\RegistrationService;
-use Illuminate\Contracts\View\View;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\RedirectResponse;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Storage;
@@ -156,15 +156,25 @@ class AuthController extends Controller
             );
         }
 
-        $deviceName = $this->agent->device() ?? 'Unknown Device';
-        $userAgent = request()->header('User-Agent');
-        $ipAddress = request()->ip();
+        $deviceNameFromRequest = request()->input('device_name');
+        $agentDetectedDevice = $this->agent->device();
 
-        // Проверяем, это новое устройство или нет
-        $isNewDevice = $loginService->isNewDevice($user, $userAgent, $ipAddress);
+        // Agent::device() может вернуть false, а сервис ожидает string.
+        $deviceName = is_string($deviceNameFromRequest) && trim($deviceNameFromRequest) !== ''
+            ? trim($deviceNameFromRequest)
+            : (is_string($agentDetectedDevice) && trim($agentDetectedDevice) !== ''
+                ? trim($agentDetectedDevice)
+                : 'Unknown Device');
+        $userAgent   = request()->header('User-Agent');
+        $ipAddress   = request()->ip();
+        $deviceToken = request()->header('X-Device-Token');
+
+        // Идентификация устройства только по device_token.
+        // IP и UA сохраняются для отображения в истории сессий, но не влияют на проверку.
+        $isNewDevice = $loginService->isNewDevice($user, $deviceToken);
 
         if ($isNewDevice) {
-            // Новое устройство - требуем подтверждение по email
+            // Новое устройство — требуем подтверждение по email
             $loginService->createLoginToken(
                 $user,
                 $deviceName,
@@ -178,13 +188,14 @@ class AuthController extends Controller
             ]);
         }
 
-        // Известное устройство - выдаем токен сразу
+        // Известное устройство — выдаём JWT сразу
         $token = JWTAuth::fromUser($user);
 
         return response()->json([
             'access_token' => $token,
             'token_type' => 'bearer',
             'expires_in' => config('jwt.ttl') * 60,
+            'device_token' => $deviceToken,
             'user' => [
                 'id' => $user->id,
                 'name' => $user->name,
@@ -246,10 +257,10 @@ class AuthController extends Controller
             );
         }
 
-        // Подтверждаем и получаем JWT
-        $jwtToken = $loginService->confirmLoginAndGetToken($data['token']);
+        // Подтверждаем и получаем JWT + device_token
+        $result = $loginService->confirmLoginAndGetToken($data['token']);
 
-        if (!$jwtToken) {
+        if (!$result) {
             return response()->json(
                 ['error' => 'Invalid or expired token'],
                 Response::HTTP_UNAUTHORIZED
@@ -262,10 +273,11 @@ class AuthController extends Controller
         // Генерируем событие подтверждения входа
         event(new LoginConfirmed($user, $loginToken->device_name));
 
-        $responseArray = [
-            'access_token' => $jwtToken,
-            'token_type' => 'bearer',
-            'expires_in' => config('jwt.ttl') * 60,
+        return response()->json([
+            'access_token' => $result['jwt'],
+            'token_type'   => 'bearer',
+            'expires_in'   => config('jwt.ttl') * 60,
+            'device_token' => $result['device_token'],
             'user' => $user ? [
                 'id' => $user->id,
                 'name' => $user->name,
@@ -279,9 +291,7 @@ class AuthController extends Controller
                 'last_seen_at' => $user->last_seen_at,
                 'avatar_url' => $user->avatar ? Storage::disk('public')->url($user->avatar) : null,
             ] : null,
-        ];
-
-        return response()->json($responseArray, Response::HTTP_OK);
+        ], Response::HTTP_OK);
     }
 
     /**
@@ -321,24 +331,40 @@ class AuthController extends Controller
      *     )
      * )
      */
-    public function confirmLoginWeb(string $token): View|JsonResponse
+    public function confirmLoginWeb(string $token): RedirectResponse
     {
-        $loginService = new LoginService();
-        $jwtToken = $loginService->confirmLoginAndGetToken($token);
+        $loginToken = LoginToken::where('token', $token)->first();
+        $frontendLoginUrl = rtrim((string) config('app.frontend_url'), '/') . '/login';
 
-        if (!$jwtToken) {
-            return response()->json(
-                ['error' => 'Invalid or expired token'],
-                Response::HTTP_BAD_REQUEST
+        if (! $loginToken || $loginToken->isExpired()) {
+            return redirect()->away(
+                $this->buildRedirectUrl($frontendLoginUrl, [
+                    'confirmation_error' => 'invalid_or_expired',
+                ])
             );
         }
 
-        return view('auth.login-confirmed', [
-            'accessToken' => $jwtToken,
-            'tokenType'   => 'bearer',
-            'expiresIn'   => config('jwt.ttl') * 60,
-            'frontendUrl' => rtrim((string) config('app.frontend_url'), '/'),
-        ]);
+        return redirect()->away(
+            $this->buildRedirectUrl($frontendLoginUrl, [
+                'confirmation_token' => $token,
+            ])
+        );
+    }
+
+    /**
+     * @param array<string, scalar|null> $params
+     */
+    private function buildRedirectUrl(string $baseUrl, array $params): string
+    {
+        $query = http_build_query(array_filter($params, static fn ($value) => $value !== null));
+
+        if ($query === '') {
+            return $baseUrl;
+        }
+
+        $separator = str_contains($baseUrl, '?') ? '&' : '?';
+
+        return $baseUrl . $separator . $query;
     }
 
     /**
